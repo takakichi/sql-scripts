@@ -1,26 +1,29 @@
+
 /*
 ===============================================================================
-  SQL Server データベース構造 Mermaid ER図生成SQL
-  Version : Rev2
-  Target  : SQL Server 2019
+ SQL Server データベース構造 Mermaid ER図生成SQL
 
-  【機能】
-    ・テーブル定義の取得
-    ・主キー、外部キーの取得
-    ・データ型、サイズ、NULL許容の取得
-    ・拡張プロパティ（MS_Description）の取得
-    ・スキーマ、テーブル名による対象の絞り込み
-    ・厳格な条件による外部キーの推測（オプション）
-    ・Mermaid ER図形式での出力
+ Version : Rev2.1
+ Target  : SQL Server 2019
+ Compatibility Level : 100以上
 
-  【注意事項】
-    ・推測リレーションは初期設定では出力しない
-    ・業務データにはアクセスしない
-    ・データベースの更新は行わない
-    ・エンティティの別名表示に対応したMermaidを使用する
+ 【機能】
+   ・テーブル定義の取得
+   ・スキーマ名の取得
+   ・単一主キー、複合主キーの取得
+   ・単一外部キー、複合外部キーの取得
+   ・データ型、サイズ、NULL許容の取得
+   ・拡張プロパティの取得
+   ・対象テーブルの絞り込み
+   ・厳格な条件による外部キーの推測（オプション）
+   ・Mermaid ER図形式での出力
 
-生成AIを使って作成したスクリプトです。十分に確認が取れていない可能性がありますので
-自己責任でご利用ください。
+ 【注意事項】
+　 ※※※　生成AIを使って作成したスクリプトです。十分に確認が取れていない可能性がありますので自己責任でご利用ください。　※※※
+   ・データ自体にはアクセスしません。
+   ・データベースの更新は行いません。
+   ・推測外部キーは初期設定では出力しません。
+   ・Mermaidはエンティティの別名表示に対応した版を使用しています。
 ===============================================================================
 */
 
@@ -32,21 +35,29 @@ SET NOCOUNT ON;
 
 -- 対象スキーマ（NULL：すべて）
 DECLARE @SchemaName SYSNAME = NULL;
+
 -- 対象テーブル名（LIKE検索）
 DECLARE @TableNamePattern NVARCHAR(128) = N'%';
+
 -- 推測外部キーの出力
 DECLARE @IncludeInferredFK BIT = 0;
+
 -- テーブルコメントの出力
 DECLARE @IncludeTableComment BIT = 1;
+
 -- 列コメントの出力
 DECLARE @IncludeColumnComment BIT = 1;
+
 -- 改行コード
 DECLARE @CRLF NVARCHAR(2) = NCHAR(13) + NCHAR(10);
 
+
 ;WITH
+
 -- ============================================================
 -- 2. 全ユーザーテーブル
 -- ============================================================
+
 AllTables AS (
     SELECT
         t.object_id,
@@ -56,10 +67,13 @@ AllTables AS (
         s.name + N'.' + t.name AS FullTableName,
 
         -- Mermaid内部識別子
-        N'T_' + CONVERT(NVARCHAR(20), t.object_id)
-            AS EntityName
+        N'T_' + REPLACE(
+            CONVERT(NVARCHAR(20), t.object_id),
+            N'-', N'N'
+        ) AS EntityName
 
     FROM sys.tables t
+
     INNER JOIN sys.schemas s
         ON t.schema_id = s.schema_id
 
@@ -77,6 +91,7 @@ TargetTables AS (
     WHERE
         (@SchemaName IS NULL
             OR SchemaName = @SchemaName)
+
         AND TableName LIKE @TableNamePattern
 ),
 
@@ -105,9 +120,12 @@ AllColumns AS (
         c.is_nullable,
         c.is_identity,
         c.is_computed,
+        c.is_hidden,
 
+        SCHEMA_NAME(ty.schema_id) AS TypeSchemaName,
         ty.name AS TypeName,
-        ty.is_user_defined
+        ty.is_user_defined,
+        ty.is_assembly_type
 
     FROM AllTables t
 
@@ -205,9 +223,12 @@ ActualFKColumns AS (
 
 -- ============================================================
 -- 7. 実外部キーの制約単位の集約
+--
+-- Rev2.1:
+-- 集約処理と文字列連結処理を分離
 -- ============================================================
 
-ActualFKs AS (
+ActualFKAggregated AS (
     SELECT
         FKObjectId,
         FKName,
@@ -226,17 +247,7 @@ ActualFKs AS (
         MIN(IsPartOfPK)
             AS IsIdentifying,
 
-        COUNT(*) AS FKColumnCount,
-
-        STRING_AGG(
-            CONVERT(
-                NVARCHAR(MAX),
-                ParentColumn + N'->' + RefColumn
-            ),
-            N', '
-        ) WITHIN GROUP (
-            ORDER BY constraint_column_id
-        ) AS ColumnMapping
+        COUNT(*) AS FKColumnCount
 
     FROM ActualFKColumns
 
@@ -248,7 +259,46 @@ ActualFKs AS (
 ),
 
 -- ============================================================
--- 8. 一意インデックスのキー列
+-- 8. 実外部キーの列対応情報
+--
+-- Rev2.1:
+-- 互換性レベル100対応
+-- STRING_AGG / WITHIN GROUPを使用しない
+-- ============================================================
+
+ActualFKs AS (
+    SELECT
+        afk.*,
+
+        STUFF(
+            (
+                SELECT
+                    N', ' +
+                    fc.ParentColumn +
+                    N'->' +
+                    fc.RefColumn
+
+                FROM ActualFKColumns fc
+
+                WHERE fc.FKObjectId = afk.FKObjectId
+
+                ORDER BY fc.constraint_column_id
+
+                FOR XML PATH(''), TYPE
+
+            ).value('.', 'NVARCHAR(MAX)'),
+
+            1,
+            2,
+            N''
+
+        ) AS ColumnMapping
+
+    FROM ActualFKAggregated afk
+),
+
+-- ============================================================
+-- 9. 一意インデックスのキー列
 --
 -- フィルター付き、無効化済み、仮想インデックスは除外
 -- INCLUDE列は一意性の判定対象外
@@ -273,11 +323,17 @@ UniqueIndexColumns AS (
       AND i.is_disabled = 0
       AND i.is_hypothetical = 0
       AND i.has_filter = 0
+
+      -- 1: クラスター化
+      -- 2: 非クラスター化
+      -- 7: 非クラスター化ハッシュ
+      AND i.type IN (1, 2, 7)
+
       AND ic.key_ordinal > 0
 ),
 
 -- ============================================================
--- 9. 一意な外部キーの判定
+-- 10. 一意な外部キーの判定
 --
 -- 一意インデックスの全キー列が外部キー列に
 -- 含まれる場合、子側は最大1件と判定する
@@ -287,7 +343,7 @@ UniqueFKs AS (
     SELECT DISTINCT
         afk.FKObjectId
 
-    FROM ActualFKs afk
+    FROM ActualFKAggregated afk
 
     INNER JOIN UniqueIndexColumns uic
         ON afk.parent_object_id = uic.object_id
@@ -312,13 +368,10 @@ UniqueFKs AS (
 ),
 
 -- ============================================================
--- 10. 推測外部キーの候補列名
+-- 11. 推測外部キーの候補列名
 --
--- 以下をすべて満たす参照先に限定する
---   ・単一主キー
---   ・テーブル名と主キー列名が命名規則上一致
---
--- 複数形の末尾sを除去する簡易ルールにも対応
+-- 単一主キーかつテーブル名と主キー列名が
+-- 命名規則上一致するものに限定する
 -- ============================================================
 
 ReferenceCandidates AS (
@@ -341,6 +394,7 @@ ReferenceCandidates AS (
     CROSS APPLY (
         VALUES
             (pk.TableName + N'Id'),
+
             (pk.TableName + N'_id'),
 
             (
@@ -364,23 +418,24 @@ ReferenceCandidates AS (
                     ) + N'_id'
                 END
             )
+
     ) v(CandidateColumnName)
 
     WHERE @IncludeInferredFK = 1
       AND pk.PKColumnCount = 1
       AND v.CandidateColumnName IS NOT NULL
-
       AND pk.PKColumnName = v.CandidateColumnName
 ),
 
 -- ============================================================
--- 11. 推測外部キーの抽出
+-- 12. 推測外部キーの抽出
 --
 -- ・列名一致
 -- ・データ型、サイズ、精度、スケール一致
 -- ・照合順序一致
 -- ・実外部キーが存在する列は除外
--- ・自己参照は推測対象外
+-- ・自己参照は対象外
+-- ・IDENTITY列、計算列、非表示列は対象外
 -- ============================================================
 
 InferredFKCandidates AS (
@@ -411,6 +466,10 @@ InferredFKCandidates AS (
 
     WHERE @IncludeInferredFK = 1
 
+      AND pc.is_identity = 0
+      AND pc.is_computed = 0
+      AND pc.is_hidden = 0
+
       AND NOT EXISTS (
           SELECT 1
 
@@ -422,9 +481,9 @@ InferredFKCandidates AS (
 ),
 
 -- ============================================================
--- 12. 推測候補の件数判定
+-- 13. 推測候補の件数判定
 --
--- 全テーブルを対象に候補数を判定する
+-- 出力対象の絞り込み前に候補数を判定する
 -- ============================================================
 
 InferredFKsRanked AS (
@@ -441,7 +500,7 @@ InferredFKsRanked AS (
 ),
 
 -- ============================================================
--- 13. 推測外部キーの確定候補
+-- 14. 推測外部キーの出力候補
 --
 -- 候補が複数存在する場合は出力しない
 -- ============================================================
@@ -449,11 +508,12 @@ InferredFKsRanked AS (
 InferredFKs AS (
     SELECT *
     FROM InferredFKsRanked
+
     WHERE CandidateCount = 1
 ),
 
 -- ============================================================
--- 14. 出力対象列とコメントの取得
+-- 15. 出力対象列とコメントの取得
 -- ============================================================
 
 TableColumns AS (
@@ -485,7 +545,8 @@ TableColumns AS (
 
                 WHERE afk.parent_object_id = c.object_id
                   AND afk.parent_column_id = c.column_id
-            ) THEN 1
+            )
+            THEN 1
             ELSE 0
         END AS IsFK
 
@@ -512,32 +573,90 @@ TableColumns AS (
 ),
 
 -- ============================================================
--- 15. Mermaid用のデータ型、識別子、コメント生成
+-- 16. Mermaid用識別子の変換判定
+--
+-- COL_から始まる列名も変換対象とすることで
+-- 自動生成識別子との重複を防止する
+-- ============================================================
+
+ColumnNameFlags AS (
+    SELECT
+        *,
+
+        CASE
+            WHEN ColumnName COLLATE Latin1_General_100_BIN2
+                    LIKE N'[A-Za-z]%'
+
+             AND ColumnName COLLATE Latin1_General_100_BIN2
+                    NOT LIKE N'%[^A-Za-z0-9_]%'
+
+             AND UPPER(ColumnName) NOT LIKE N'COL[_]%'
+
+             AND UPPER(ColumnName) NOT IN (
+                 N'PK', N'FK', N'UK',
+                 N'ERDIAGRAM', N'DIRECTION',
+                 N'STYLE', N'CLASS', N'CLASSDEF',
+                 N'END'
+             )
+
+            THEN 0
+            ELSE 1
+
+        END AS IsColumnNameConverted,
+
+        CASE
+            WHEN TypeName COLLATE Latin1_General_100_BIN2
+                    LIKE N'[A-Za-z]%'
+
+             AND TypeName COLLATE Latin1_General_100_BIN2
+                    NOT LIKE N'%[^A-Za-z0-9_]%'
+
+             AND UPPER(TypeName) NOT IN (
+                 N'PK', N'FK', N'UK',
+                 N'ERDIAGRAM', N'DIRECTION',
+                 N'STYLE', N'CLASS', N'CLASSDEF',
+                 N'END'
+             )
+
+            THEN 0
+            ELSE 1
+
+        END AS IsTypeNameConverted
+
+    FROM TableColumns
+),
+
+-- ============================================================
+-- 17. Mermaid用のデータ型、識別子、コメント生成
 -- ============================================================
 
 ColumnsFormatted AS (
     SELECT
         *,
 
-        -- Mermaidで安全に扱えるデータ型
+        -- データ型とサイズ
         CASE
-            WHEN TypeName COLLATE Latin1_General_100_BIN2
-                    LIKE N'[A-Za-z]%'
-             AND TypeName COLLATE Latin1_General_100_BIN2
-                    NOT LIKE N'%[^A-Za-z0-9_]%'
-            THEN TypeName
-            ELSE N'custom_type'
+            WHEN IsTypeNameConverted = 1
+            THEN N'custom_type'
+            ELSE TypeName
         END +
 
         CASE
-            WHEN is_user_defined = 1 THEN N''
+            WHEN is_user_defined = 1
+              OR is_assembly_type = 1
+            THEN N''
 
             WHEN TypeName IN (N'nvarchar', N'nchar')
             THEN
                 N'(' +
                 CASE
-                    WHEN max_length = -1 THEN N'MAX'
-                    ELSE CONVERT(NVARCHAR(10), max_length / 2)
+                    WHEN max_length = -1
+                    THEN N'MAX'
+
+                    ELSE CONVERT(
+                        NVARCHAR(10),
+                        max_length / 2
+                    )
                 END +
                 N')'
 
@@ -548,8 +667,13 @@ ColumnsFormatted AS (
             THEN
                 N'(' +
                 CASE
-                    WHEN max_length = -1 THEN N'MAX'
-                    ELSE CONVERT(NVARCHAR(10), max_length)
+                    WHEN max_length = -1
+                    THEN N'MAX'
+
+                    ELSE CONVERT(
+                        NVARCHAR(10),
+                        max_length
+                    )
                 END +
                 N')'
 
@@ -581,20 +705,17 @@ ColumnsFormatted AS (
 
         END AS DataTypeWithSize,
 
-        -- 特殊文字を含む列名は安全な識別子に置換
+        -- Mermaid用の列識別子
         CASE
-            WHEN ColumnName COLLATE Latin1_General_100_BIN2
-                    LIKE N'[A-Za-z]%'
-             AND ColumnName COLLATE Latin1_General_100_BIN2
-                    NOT LIKE N'%[^A-Za-z0-9_]%'
+            WHEN IsColumnNameConverted = 0
             THEN ColumnName
 
-            ELSE N'__COL_' +
+            ELSE N'COL_' +
                 CONVERT(NVARCHAR(10), column_id)
 
         END AS MermaidColumnName,
 
-        -- テーブル表示名の整形
+        -- テーブル表示名
         REPLACE(
             REPLACE(
                 REPLACE(
@@ -609,7 +730,7 @@ ColumnsFormatted AS (
             N'"', N''''
         ) AS SafeTableName,
 
-        -- テーブルコメントの整形
+        -- テーブルコメント
         REPLACE(
             REPLACE(
                 REPLACE(
@@ -624,7 +745,7 @@ ColumnsFormatted AS (
             N'"', N''''
         ) AS SafeTableComment,
 
-        -- 列コメントの整形
+        -- 列コメント
         REPLACE(
             REPLACE(
                 REPLACE(
@@ -639,7 +760,7 @@ ColumnsFormatted AS (
             N'"', N''''
         ) AS SafeColComment,
 
-        -- 元の列名をコメント用に整形
+        -- 元の列名
         REPLACE(
             REPLACE(
                 REPLACE(
@@ -654,12 +775,22 @@ ColumnsFormatted AS (
             N'"', N''''
         ) AS SafeOriginalColumnName,
 
-        -- 元のデータ型名をコメント用に整形
+        -- 元のデータ型名
+        -- ユーザー定義型はスキーマ名を付加する
         REPLACE(
             REPLACE(
                 REPLACE(
                     REPLACE(
-                        TypeName,
+                        CASE
+                            WHEN is_user_defined = 1
+                            THEN ISNULL(
+                                TypeSchemaName + N'.',
+                                N''
+                            ) + TypeName
+
+                            ELSE TypeName
+                        END,
+
                         NCHAR(13), N' '
                     ),
                     NCHAR(10), N' '
@@ -669,11 +800,11 @@ ColumnsFormatted AS (
             N'"', N''''
         ) AS SafeOriginalTypeName
 
-    FROM TableColumns
+    FROM ColumnNameFlags
 ),
 
 -- ============================================================
--- 16. 列コメントの組み立て
+-- 18. 列コメントの組み立て
 -- ============================================================
 
 ColumnsRanked AS (
@@ -711,17 +842,28 @@ ColumnsRanked AS (
             END +
 
             CASE
-                WHEN MermaidColumnName <> ColumnName
-                THEN N'[COLUMN: ' +
-                    SafeOriginalColumnName + N'] '
+                WHEN is_hidden = 1
+                THEN N'[HIDDEN] '
+                ELSE N''
+            END +
+
+            CASE
+                WHEN IsColumnNameConverted = 1
+                THEN
+                    N'[COLUMN: ' +
+                    SafeOriginalColumnName +
+                    N'] '
                 ELSE N''
             END +
 
             CASE
                 WHEN is_user_defined = 1
-                  OR DataTypeWithSize = N'custom_type'
-                THEN N'[TYPE: ' +
-                    SafeOriginalTypeName + N'] '
+                  OR is_assembly_type = 1
+                  OR IsTypeNameConverted = 1
+                THEN
+                    N'[TYPE: ' +
+                    SafeOriginalTypeName +
+                    N'] '
                 ELSE N''
             END +
 
@@ -733,7 +875,7 @@ ColumnsRanked AS (
 ),
 
 -- ============================================================
--- 17. テーブル定義の生成
+-- 19. テーブル定義の生成
 -- ============================================================
 
 TableDefs AS (
@@ -754,6 +896,7 @@ TableDefs AS (
                         LTRIM(RTRIM(SafeTableComment)),
                         N''
                     ) IS NOT NULL
+
                     THEN
                         N'    %% ' +
                         SafeTableComment +
@@ -808,7 +951,7 @@ TableDefs AS (
 ),
 
 -- ============================================================
--- 18. 実リレーションの生成
+-- 20. 実リレーションの生成
 --
 -- 親側：
 --   NULL許容あり → 0または1
@@ -820,6 +963,9 @@ TableDefs AS (
 --
 -- 識別関係：
 --   外部キーの全構成列が子の主キーに含まれる場合
+--
+-- Rev2.1:
+-- 制約状態と設計上の多重度を分離する
 -- ============================================================
 
 Relations_Actual AS (
@@ -837,26 +983,24 @@ Relations_Actual AS (
 
         rt.EntityName +
 
+        -- 親側の多重度
         CASE
             WHEN afk.HasNullableColumn = 1
-              OR afk.IsDisabled = 1
-              OR afk.IsNotTrusted = 1
             THEN N' |o'
-
             ELSE N' ||'
         END +
 
+        -- 識別・非識別リレーション
         CASE
             WHEN afk.IsIdentifying = 1
             THEN N'--'
-
             ELSE N'..'
         END +
 
+        -- 子側の多重度
         CASE
             WHEN ufk.FKObjectId IS NOT NULL
             THEN N'o| '
-
             ELSE N'o{ '
         END +
 
@@ -864,12 +1008,15 @@ Relations_Actual AS (
 
         N' : "' +
 
+        -- 外部キー名と列対応
         REPLACE(
             REPLACE(
                 REPLACE(
                     REPLACE(
                         afk.FKName +
-                        N' (' + afk.ColumnMapping + N')',
+                        N' (' +
+                        ISNULL(afk.ColumnMapping, N'') +
+                        N')',
 
                         NCHAR(13), N' '
                     ),
@@ -880,6 +1027,7 @@ Relations_Actual AS (
             N'"', N''''
         ) +
 
+        -- 制約の状態
         CASE
             WHEN afk.IsDisabled = 1
             THEN N' [DISABLED]'
@@ -907,10 +1055,10 @@ Relations_Actual AS (
 ),
 
 -- ============================================================
--- 19. 推測リレーションの生成
+-- 21. 推測リレーションの生成
 --
 -- 推測であることをラベルで明示する
--- 多重度は保証されないため、任意の参照として表現
+-- 多重度は仮定として任意の参照を表現する
 -- ============================================================
 
 Relations_Inferred AS (
@@ -961,7 +1109,7 @@ Relations_Inferred AS (
 ),
 
 -- ============================================================
--- 20. 出力内容の結合
+-- 22. 出力内容の結合
 -- ============================================================
 
 Combined AS (
@@ -970,7 +1118,11 @@ Combined AS (
         N'' AS SortName,
         0 AS SortObjectId,
         0 AS ColOrder,
-        CONVERT(NVARCHAR(MAX), N'erDiagram') AS LineText
+
+        CONVERT(
+            NVARCHAR(MAX),
+            N'erDiagram'
+        ) AS LineText
 
     UNION ALL
 
@@ -980,6 +1132,7 @@ Combined AS (
         SortObjectId,
         ColOrder,
         LineText
+
     FROM TableDefs
 
     UNION ALL
@@ -990,6 +1143,7 @@ Combined AS (
         SortObjectId,
         ColOrder,
         LineText
+
     FROM Relations_Actual
 
     UNION ALL
@@ -1000,11 +1154,12 @@ Combined AS (
         SortObjectId,
         ColOrder,
         LineText
+
     FROM Relations_Inferred
 )
 
 -- ============================================================
--- 21. Mermaidコードの出力
+-- 23. Mermaidコードの出力
 -- ============================================================
 
 SELECT
